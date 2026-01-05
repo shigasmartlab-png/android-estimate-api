@@ -6,15 +6,16 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 本番はフロントのURLに絞る
+    allow_origins=["*"],  # 本番はフロントURLに絞る
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ======== ここだけ iPhone / Android で変える =========
-PRICES_CSV = "data/android_prices.csv"  # Android 用
-# ================================================
+# ======== ここだけ iPhone / Android で切り替える =========
+PRICES_CSV = "data/android_prices.csv"   # Android 用
+# PRICES_CSV = "data/prices.csv"  # iPhone 用
+# ==========================================================
 OPTIONS_CSV = "data/options.csv"
 
 
@@ -40,11 +41,10 @@ def get_models():
 @app.get("/repairs")
 def get_repairs(model: str):
     """
-    機種ごとの故障内容と状態を返す。
     status:
-      - available  : 通常対応可能
-      - unsupported: 未対応
-      - soldout    : SOLD OUT（在庫なし）
+      - available
+      - unsupported
+      - soldout
     """
     try:
         df = pd.read_csv(PRICES_CSV, usecols=["機種", "故障内容", "原価"])
@@ -111,6 +111,10 @@ def estimate(model: str, repair_type: str, options: str = ""):
 
         if None in [cost, shipping, profit_rate]:
             return {"error": "未対応"}
+
+        # ★ 原価が 10,000円超なら利益率を 50% に強制
+        if cost > 10000:
+            profit_rate = 0.5
 
         if profit_rate >= 1:
             return {"error": "利益率が1以上のため計算できません"}
