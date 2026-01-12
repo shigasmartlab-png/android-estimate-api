@@ -17,21 +17,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# CSVファイルのパス
+# データフォルダ
 DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
-CSV_PATH = DATA_DIR / "reservations.csv"
 
-# 初期化：CSVがなければヘッダーを作成
-if not CSV_PATH.exists():
-    with CSV_PATH.open("w", newline="", encoding="utf-8") as f:
+# CSVファイル
+RESERVATIONS_CSV = DATA_DIR / "reservations.csv"
+HOLIDAYS_CSV = DATA_DIR / "holidays.csv"
+
+# 初期化：予約CSV
+if not RESERVATIONS_CSV.exists():
+    with RESERVATIONS_CSV.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
             "id", "date", "time", "name", "phone",
             "menu", "memo", "created_at", "status"
         ])
 
-# 営業時間中の予約枠（必要に応じて変更）
+# 初期化：休みの日CSV
+if not HOLIDAYS_CSV.exists():
+    with HOLIDAYS_CSV.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["date"])
+
+# 営業時間（予約枠）
 TIME_SLOTS = [
     "10:00", "11:00", "12:00",
     "13:00", "14:00", "15:00",
@@ -39,9 +48,53 @@ TIME_SLOTS = [
 ]
 
 
+# --------------------------
+# CSV 読み書き関数
+# --------------------------
+
+def read_reservations():
+    rows = []
+    with RESERVATIONS_CSV.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows.append(row)
+    return rows
+
+
+def write_reservations(rows):
+    with RESERVATIONS_CSV.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=[
+            "id", "date", "time", "name", "phone",
+            "menu", "memo", "created_at", "status"
+        ])
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def read_holidays():
+    rows = []
+    with HOLIDAYS_CSV.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows.append(row["date"])
+    return rows
+
+
+def write_holidays(dates):
+    with HOLIDAYS_CSV.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["date"])
+        for d in dates:
+            writer.writerow([d])
+
+
+# --------------------------
+# リクエストモデル
+# --------------------------
+
 class ReserveRequest(BaseModel):
-    date: str   # "2025-02-10"
-    time: str   # "14:00"
+    date: str
+    time: str
     name: str
     phone: str
     menu: str
@@ -52,33 +105,33 @@ class CancelRequest(BaseModel):
     reservation_id: str
 
 
-def read_reservations():
-    rows = []
-    with CSV_PATH.open("r", newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            rows.append(row)
-    return rows
+class HolidayAdd(BaseModel):
+    date: str
 
 
-def write_reservations(rows):
-    with CSV_PATH.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=[
-            "id", "date", "time", "name", "phone",
-            "menu", "memo", "created_at", "status"
-        ])
-        writer.writeheader()
-        writer.writerows(rows)
+class HolidayRemove(BaseModel):
+    date: str
 
+
+# --------------------------
+# API：空き状況
+# --------------------------
 
 @app.get("/availability")
 def get_availability(date: str):
-    """
-    指定日の空き状況を返す
-    """
+    holidays = read_holidays()
+
+    # ★ 休みの日なら全枠 unavailable
+    if date in holidays:
+        return {
+            "date": date,
+            "slots": [
+                {"time": t, "status": "holiday"} for t in TIME_SLOTS
+            ]
+        }
+
     rows = read_reservations()
 
-    # その日の「予約済み」枠だけ抽出
     reserved_times = {
         r["time"]
         for r in rows
@@ -91,21 +144,25 @@ def get_availability(date: str):
             "time": t,
             "status": "reserved" if t in reserved_times else "available"
         })
+
     return {"date": date, "slots": result}
 
 
+# --------------------------
+# API：予約
+# --------------------------
+
 @app.post("/reserve")
 def reserve(data: ReserveRequest):
-    """
-    予約登録
-    """
-    # 時間枠バリデーション
     if data.time not in TIME_SLOTS:
         raise HTTPException(status_code=400, detail="不正な時間帯です。")
 
+    holidays = read_holidays()
+    if data.date in holidays:
+        raise HTTPException(status_code=400, detail="この日は休業日です。")
+
     rows = read_reservations()
 
-    # すでに予約が入っているか確認（キャンセル済みは無視）
     for r in rows:
         if (
             r["date"] == data.date and
@@ -128,27 +185,26 @@ def reserve(data: ReserveRequest):
         "created_at": now,
         "status": "reserved",
     }
+
     rows.append(new_row)
     write_reservations(rows)
 
-    return {
-        "message": "予約を受け付けました。",
-        "reservation_id": rid
-    }
+    return {"message": "予約を受け付けました。", "reservation_id": rid}
 
+
+# --------------------------
+# API：キャンセル
+# --------------------------
 
 @app.post("/cancel")
 def cancel(data: CancelRequest):
-    """
-    予約キャンセル（論理削除：statusをcancelledに変更）
-    """
     rows = read_reservations()
     found = False
 
     for r in rows:
         if r["id"] == data.reservation_id:
             if r["status"] == "cancelled":
-                raise HTTPException(status_code=400, detail="すでにキャンセル済みの予約です。")
+                raise HTTPException(status_code=400, detail="すでにキャンセル済みです。")
             r["status"] = "cancelled"
             found = True
             break
@@ -160,12 +216,42 @@ def cancel(data: CancelRequest):
     return {"message": "予約をキャンセルしました。"}
 
 
+# --------------------------
+# API：予約一覧（管理用）
+# --------------------------
+
 @app.get("/list")
 def list_reservations(date: str | None = None):
-    """
-    管理用：予約一覧（必要なら管理画面から使う）
-    """
     rows = read_reservations()
     if date:
         rows = [r for r in rows if r["date"] == date]
     return {"reservations": rows}
+
+
+# --------------------------
+# API：休みの日管理
+# --------------------------
+
+@app.get("/holidays")
+def get_holidays():
+    return {"holidays": read_holidays()}
+
+
+@app.post("/holidays/add")
+def add_holiday(data: HolidayAdd):
+    holidays = read_holidays()
+    if data.date in holidays:
+        raise HTTPException(status_code=400, detail="すでに登録されています。")
+    holidays.append(data.date)
+    write_holidays(holidays)
+    return {"message": "休みの日を追加しました。"}
+
+
+@app.post("/holidays/remove")
+def remove_holiday(data: HolidayRemove):
+    holidays = read_holidays()
+    if data.date not in holidays:
+        raise HTTPException(status_code=404, detail="登録されていません。")
+    holidays = [d for d in holidays if d != data.date]
+    write_holidays(holidays)
+    return {"message": "休みの日を削除しました。"}
