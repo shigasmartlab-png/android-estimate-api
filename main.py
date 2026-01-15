@@ -68,27 +68,18 @@ def write_holidays(rows):
         for r in rows:
             writer.writerow([r["date"], r["time"]])
 
-class ReserveRequest(BaseModel):
-    date: str
-    time: str
-    name: str
-    phone: str
-    menu: str
-    memo: str | None = ""
+# -------------------------------
+# Utility: 時刻を分に変換
+# -------------------------------
+def time_to_minutes(t: str) -> int:
+    h, m = map(int, t.split(":"))
+    return h * 60 + m
 
-class CancelRequest(BaseModel):
-    reservation_id: str
-
-class HolidayAdd(BaseModel):
-    date: str
-    time: str
-
-class HolidayRemove(BaseModel):
-    date: str
-    time: str
-
+# -------------------------------
+# /availability（duration 対応版）
+# -------------------------------
 @app.get("/availability")
-def get_availability(date: str):
+def get_availability(date: str, duration: int = 60):
     holidays = read_holidays()
     holiday_times = {h["time"] for h in holidays if h["date"] == date}
 
@@ -99,17 +90,43 @@ def get_availability(date: str):
         if r["date"] == date and r["status"] == "reserved"
     }
 
+    # 各スロットの開始時刻（分）
+    slot_minutes = [time_to_minutes(t) for t in TIME_SLOTS]
+
     result = []
-    for t in TIME_SLOTS:
-        if t in holiday_times:
-            status = "holiday"
-        elif t in reserved_times:
-            status = "reserved"
-        else:
-            status = "available"
-        result.append({"time": t, "status": status})
+
+    for i, t in enumerate(TIME_SLOTS):
+        start = slot_minutes[i]
+        end = start + duration
+
+        # duration 分連続で空いているかチェック
+        ok = True
+        for j, t2 in enumerate(TIME_SLOTS):
+            tm = slot_minutes[j]
+            if start <= tm < end:
+                if t2 in holiday_times or t2 in reserved_times:
+                    ok = False
+                    break
+
+        status = "available" if ok else "unavailable"
+        result.append({
+            "time": t,
+            "available": ok,
+            "status": status
+        })
 
     return {"date": date, "slots": result}
+
+# -------------------------------
+# /reserve
+# -------------------------------
+class ReserveRequest(BaseModel):
+    date: str
+    time: str
+    name: str
+    phone: str
+    menu: str
+    memo: str | None = ""
 
 @app.post("/reserve")
 def reserve(data: ReserveRequest):
@@ -138,6 +155,12 @@ def reserve(data: ReserveRequest):
     write_reservations(rows)
     return {"message": "予約を受け付けました。", "reservation_id": rid}
 
+# -------------------------------
+# /cancel
+# -------------------------------
+class CancelRequest(BaseModel):
+    reservation_id: str
+
 @app.post("/cancel")
 def cancel(data: CancelRequest):
     rows = read_reservations()
@@ -148,10 +171,24 @@ def cancel(data: CancelRequest):
             return {"message": "予約をキャンセルしました。"}
     raise HTTPException(status_code=404, detail="予約が見つかりません。")
 
+# -------------------------------
+# /list
+# -------------------------------
 @app.get("/list")
 def list_reservations(date: str | None = None):
     rows = read_reservations()
     return {"reservations": [r for r in rows if not date or r["date"] == date]}
+
+# -------------------------------
+# Holidays API
+# -------------------------------
+class HolidayAdd(BaseModel):
+    date: str
+    time: str
+
+class HolidayRemove(BaseModel):
+    date: str
+    time: str
 
 @app.get("/holidays")
 def get_holidays():
